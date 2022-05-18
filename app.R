@@ -742,20 +742,22 @@ ui <- fluidPage(
                       
              ),
 
-             tabPanel("QTL lookup",
+             tabPanel("QTL Lookup",
                   # Sidebar with a slider input for number of bins 
                   sidebarLayout(
                     sidebarPanel(
                       # Before search
                       h3('Query'),
                       selectInput('qtllookupMode', label = 'Lookup type', 
-                                  choices = list("Query by gene" = 1, "Query by rsid (doesn\'t work yet)" = 2), 
+                                  choices = list("Query by gene" = 1, "Query by rsid" = 2), 
                                   selected = 1),
                       textInput('qtllookupGene', label = 'Gene name / rsid', value = 'APOBR'),
                       actionButton(
                         inputId = "qtllookupPerformQuery",
                         label = "Start Query",
-                        width = '100%'
+                        width = '100%',
+                        style = "unite",
+                        color = "success"
                       ),
                       
                       # After search
@@ -774,6 +776,7 @@ ui <- fluidPage(
                     
                     # Show a plot of the generated distribution
                     mainPanel(
+                      uiOutput('qtlLookupHeaderText'),
                       plotOutput("qtlplot"),
                       DT::dataTableOutput('qtltable')
                     )
@@ -1869,7 +1872,15 @@ server <- function(input, output, session) {
     if (class(qtllookupStore$df) == "numeric") {
       data.frame()
     } else {
-      df = qtllookupStore$df[,c('source', 'tissue', 'sentinel', 'chr', 'var_pos_hg19', 'p', 'beta', 'ea', 'nea', 'colocalization')]
+      if (qtllookupStore$mode == 1) {
+        # query by gene
+        header = c('source', 'tissue', 'rsid', 'chr', 'var_pos_hg19', 'p', 'beta', 'ea', 'nea', 'colocalization')
+      } else {
+        # query by rsid
+        header = c('source', 'tissue', 'rsid', 'gene', 'ensgid', 'p', 'beta', 'ea', 'nea', 'colocalization')
+      }
+      qtllookupStore$header = header
+      df = qtllookupStore$df[,header]
       if (tissueFilter != "Any") {
         df = df[df$tissue == tissueFilter,]
       }
@@ -1899,24 +1910,63 @@ server <- function(input, output, session) {
       updateSelectInput(session, "qtllookupTissue", choices=tissueOptions)
     }
   })
-  
-  observeEvent(input$qtllookupPerformQuery, {
-    df = Qtlizer::get_qtls(input$qtllookupGene)
-    df = df[df$gene == input$qtllookupGene,]
+
+  doQTLLookup <- function(mode, query) {
+    # perform query
+    if (mode == 1 || mode == 'gene') {
+        # query by gene
+        df = Qtlizer::get_qtls(query)
+        df = df[df$gene == query,]
+        qtllookupStore$mode = 1
+    } else {
+        # query by rsid
+        df = Qtlizer::get_qtls(query, corr=0.50)
+        df = df[df$sentinel == query,]
+        qtllookupStore$mode = 2
+    }
+    # process df
     df$chr = as.integer(df$chr)
     df$var_pos_hg19 = as.integer(df$var_pos_hg19)
     df$p = as.numeric(df$p)
-    
+    df$rsid = ifelse(is.na(df$proxy_variant), df$sentinel, df$proxy_variant)
+    # set globals for render functions
     qtllookupStore$df = df
-    
+    qtllookupStore$query = query
+    # Update source filter ui
     sourceOptions <- c('Any', unique(df$source))
     names(sourceOptions) <- sourceOptions
     updateSelectInput(session, "qtllookupSource", choices=sourceOptions)
-    
+    # Update tissue filter ui
     tissueOptions <- c('Any', unique(df$tissue))
     names(tissueOptions) <- tissueOptions
     updateSelectInput(session, "qtllookupTissue", choices=tissueOptions)
-    
+  }
+
+  output$qtlLookupHeaderText = renderUI({
+    if (qtllookupStore$mode == 1) {
+      h3(paste('QTL Gene lookup for query: ', qtllookupStore$query))
+    } else if (qtllookupStore$mode == 2) {
+      h3(paste('QTL rsid lookup for query: ', qtllookupStore$query))
+    } else {
+      h3('...')
+    }
+  })
+
+  observeEvent(input$qtltable_cell_clicked, {
+    cell <- input$qtltable_cell_clicked
+    if(length(cell)) {
+      print(cell)
+        print(colnames(qtllookupStore$df)[cell$col])
+      if (qtllookupStore$header[cell$col] == 'gene') {
+          doQTLLookup('gene', cell$value)
+      } else if (qtllookupStore$header[cell$col] == 'rsid') {
+          doQTLLookup('rsid', cell$value)
+      }
+      #details <- mtcars[mtcars[[cell$col]]==cell$value,]
+    }
+  })
+  observeEvent(input$qtllookupPerformQuery, {
+    doQTLLookup(input$qtllookupMode, input$qtllookupGene)
   })
   
   output$qtlplot = renderPlot({
@@ -1931,21 +1981,22 @@ server <- function(input, output, session) {
       if (sourceFilter != "Any") {
         df = df[df$source == sourceFilter,]
       }
+      df = df[df$p != 0,] # breaks plots
       if (input$qtllookupPlotType == 'cis') {
-        cis = df[(df$colocalization %in% 'cis'),]
-        topSNP = cis$sentinel[which.min(cis$p)]
+        cis = df[!(df$colocalization %in% 'trans'),]
+        topSNP = cis$rsid[which.min(cis$p)]
         chr = cis$chr[which.min(cis$p)]
-        pos = cis$var_pos_hg19[which.min(cis$p)]
-        df.racer = RACER::formatRACER(cis, chr_col = 'chr', pos_col = 'var_pos_hg19', p_col = 'p', rs_col = 'sentinel')
+        pos = cis$var_pos_hg19[which.min(cis$p)] # position of lowest p value qtl
+        df.racer = RACER::formatRACER(cis, chr_col = 'chr', pos_col = 'var_pos_hg19', p_col = 'p', rs_col = 'rsid')
         if (doLDLookup) {
           df.racer = RACER::ldRACER(df.racer, rs_col = 'RS_ID', pops = 'EUR', lead_snp = topSNP)
         }
-        window = max(1000, min(200000, 500 + max(abs(cis$var_pos_hg19 - pos))))
+        window = max(100000, min(200000, 500 + max(abs(cis$var_pos_hg19 - pos))))
         RACER::singlePlotRACER(assoc_data = df.racer, chr = chr, build = 'hg19', plotby = 'coord', start_plot = pos - window, end_plot = pos + window, label_lead = T)
         #RACER::singlePlotRACER(assoc_data = df.racer, chr = chr, build = 'hg19', plotby = 'gene', gene_plot = input$gene)
       } else {
         print(table(df$chr))
-        qqman::manhattan(df, chr='chr', bp='var_pos_hg19', snp='sentinel', p = 'p', annotateTop = T)
+        qqman::manhattan(df, chr='chr', bp='var_pos_hg19', snp='rsid', p = 'p', annotateTop = T)
       }
     }
   })
