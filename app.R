@@ -1,5 +1,4 @@
-###### PlaqView Master Code ######
-##### Author: Wei Feng Ma, UVA.
+###### PlaqView Master Code ###### ## Author: Wei Feng Ma, UVA.
 ##### wm5wt@virginia.edu
 
 set.seed(100)
@@ -81,6 +80,9 @@ library(gtools)
 library(CIPR)
 library(reactable)
 library(markdown)
+library(Qtlizer) # BiocManager::install("Qtlizer")
+library(RACER) # library(devtools) ; install_github("oliviasabik/RACER")
+library(qqman) # install.packages("qqman")
 # library(reactlog)
 # library(future)
 # 
@@ -739,8 +741,45 @@ ui <- fluidPage(
                       )
                       
              ),
-             
-             
+
+             tabPanel("QTL lookup",
+                  # Sidebar with a slider input for number of bins 
+                  sidebarLayout(
+                    sidebarPanel(
+                      # Before search
+                      h3('Query'),
+                      selectInput('qtllookupMode', label = 'Lookup type', 
+                                  choices = list("Query by gene" = 1, "Query by rsid (doesn\'t work yet)" = 2), 
+                                  selected = 1),
+                      textInput('qtllookupGene', label = 'Gene name / rsid', value = 'APOBR'),
+                      actionButton(
+                        inputId = "qtllookupPerformQuery",
+                        label = "Start Query",
+                        width = '100%'
+                      ),
+                      
+                      # After search
+                      h3('Filters'),
+                      selectInput('qtllookupPlotType', label = 'Plot type', 
+                                  choices = list('Cis-window' = 'cis', 'Trans' = 'trans'), 
+                                  selected = 'cis'),
+                      selectInput('qtllookupSource', label = 'Filter on source', 
+                                  choices = list("Any" = 1), 
+                                  selected = 1),
+                      selectInput('qtllookupTissue', label = 'Filter on tissue', 
+                                  choices = list("Any" = 1), 
+                                  selected = 1),
+                      checkboxInput('qtllookupLDPlot', label= 'Show LD score (slow)', value = F)
+                    ),
+                    
+                    # Show a plot of the generated distribution
+                    mainPanel(
+                      plotOutput("qtlplot"),
+                      DT::dataTableOutput('qtltable')
+                    )
+              )),
+
+
              ### JS to jump to top of page on click ###
              tags$script(" $(document).ready(function () {
                          $('#jumpto1').on('click', function (e) {
@@ -1821,8 +1860,96 @@ server <- function(input, output, session) {
   
   #### SER: Waiter ####
   waiter_hide()
+
+  ### QTL LOOKUP FUNCTION BEGIN
+  qtllookupStore = reactiveValues(df=0)
+  output$qtltable = DT::renderDataTable({
+    tissueFilter = input$qtllookupTissue
+    sourceFilter = input$qtllookupSource
+    if (class(qtllookupStore$df) == "numeric") {
+      data.frame()
+    } else {
+      df = qtllookupStore$df[,c('source', 'tissue', 'sentinel', 'chr', 'var_pos_hg19', 'p', 'beta', 'ea', 'nea', 'colocalization')]
+      if (tissueFilter != "Any") {
+        df = df[df$tissue == tissueFilter,]
+      }
+      if (sourceFilter != "Any") {
+        df = df[df$source == sourceFilter,]
+      }
+      if (nrow(df) == 0) {
+        data.frame(message='Query / filter combination has no results..')
+      } else {
+        df
+      }
+    }
+  })
+
+  observeEvent(input$qtllookupSource, {
+    # update tissue filter with source filter options
+    df = qtllookupStore$df
+    sourceFilter = input$qtllookupSource
+    if (class(df) == "numeric") {
+    } else if (input$qtllookupSource == "Any") {
+      tissueOptions = c('Any', unique(df$tissue))
+      names(tissueOptions) <- tissueOptions
+      updateSelectInput(session, "qtllookupTissue", choices=tissueOptions)
+    } else {
+      tissueOptions = c('Any', unique(df$tissue[df$source == sourceFilter]))
+      names(tissueOptions) <- tissueOptions
+      updateSelectInput(session, "qtllookupTissue", choices=tissueOptions)
+    }
+  })
   
+  observeEvent(input$qtllookupPerformQuery, {
+    df = Qtlizer::get_qtls(input$qtllookupGene)
+    df = df[df$gene == input$qtllookupGene,]
+    df$chr = as.integer(df$chr)
+    df$var_pos_hg19 = as.integer(df$var_pos_hg19)
+    df$p = as.numeric(df$p)
+    
+    qtllookupStore$df = df
+    
+    sourceOptions <- c('Any', unique(df$source))
+    names(sourceOptions) <- sourceOptions
+    updateSelectInput(session, "qtllookupSource", choices=sourceOptions)
+    
+    tissueOptions <- c('Any', unique(df$tissue))
+    names(tissueOptions) <- tissueOptions
+    updateSelectInput(session, "qtllookupTissue", choices=tissueOptions)
+    
+  })
   
+  output$qtlplot = renderPlot({
+    df = qtllookupStore$df
+    doLDLookup = input$qtllookupLDPlot
+    tissueFilter = input$qtllookupTissue
+    sourceFilter = input$qtllookupSource
+    if (class(df) != "numeric") {
+      if (tissueFilter != "Any") {
+        df = df[df$tissue == tissueFilter,]
+      }
+      if (sourceFilter != "Any") {
+        df = df[df$source == sourceFilter,]
+      }
+      if (input$qtllookupPlotType == 'cis') {
+        cis = df[(df$colocalization %in% 'cis'),]
+        topSNP = cis$sentinel[which.min(cis$p)]
+        chr = cis$chr[which.min(cis$p)]
+        pos = cis$var_pos_hg19[which.min(cis$p)]
+        df.racer = RACER::formatRACER(cis, chr_col = 'chr', pos_col = 'var_pos_hg19', p_col = 'p', rs_col = 'sentinel')
+        if (doLDLookup) {
+          df.racer = RACER::ldRACER(df.racer, rs_col = 'RS_ID', pops = 'EUR', lead_snp = topSNP)
+        }
+        window = max(1000, min(200000, 500 + max(abs(cis$var_pos_hg19 - pos))))
+        RACER::singlePlotRACER(assoc_data = df.racer, chr = chr, build = 'hg19', plotby = 'coord', start_plot = pos - window, end_plot = pos + window, label_lead = T)
+        #RACER::singlePlotRACER(assoc_data = df.racer, chr = chr, build = 'hg19', plotby = 'gene', gene_plot = input$gene)
+      } else {
+        print(table(df$chr))
+        qqman::manhattan(df, chr='chr', bp='var_pos_hg19', snp='sentinel', p = 'p', annotateTop = T)
+      }
+    }
+  })
+  ### QTL LOOKUP FUNCTION END
 
   
 } # ends server function
