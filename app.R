@@ -747,11 +747,10 @@ ui <- fluidPage(
                   sidebarLayout(
                     sidebarPanel(
                       # Before search
-                      h3('Query'),
-                      selectInput('qtllookupMode', label = 'Lookup type', 
-                                  choices = list("Query by gene" = 1, "Query by rsid" = 2), 
-                                  selected = 1),
-                      textInput('qtllookupGene', label = 'Gene name / rsid', value = 'APOBR'),
+                      h3('Query by gene or rsid'),
+                      textInput('qtllookupGene',
+                                label = 'Gene Name (HUGO) or rsID ',
+                                value = 'APOBR'),
                       actionButton(
                         inputId = "qtllookupPerformQuery",
                         label = "Start Query",
@@ -762,16 +761,48 @@ ui <- fluidPage(
                       
                       # After search
                       h3('Filters'),
-                      selectInput('qtllookupPlotType', label = 'Plot type', 
+                      selectInput('qtllookupPlotType',
+                                  label = 'Plot Type',
                                   choices = list('Cis-window' = 'cis', 'Trans' = 'trans'), 
                                   selected = 'cis'),
-                      selectInput('qtllookupSource', label = 'Filter on source', 
+                      selectInput('qtllookupSource',
+                                  label = 'Filter on Source', 
                                   choices = list("Any" = 1), 
                                   selected = 1),
-                      selectInput('qtllookupTissue', label = 'Filter on tissue', 
+                      selectInput('qtllookupTissue',
+                                  label = 'Filter on Tissue', 
                                   choices = list("Any" = 1), 
                                   selected = 1),
-                      checkboxInput('qtllookupLDPlot', label= 'Show LD score (slow)', value = F)
+                      checkboxInput('qtllookupLDPlot',
+                                    label= 'Show LD score (slow)',
+                                    value = F),
+                      h3('Help'),
+                      tags$b("Source:"),
+                      tags$span("Qtl database"),
+                      tags$b("Tissue:"),
+                      tags$span("Sample tissue"),
+                      tags$b("rsID:"),
+                      tags$span("Reference snp identifier"),
+                      tags$b("Chr:"),
+                      tags$span("variant chromosome"),
+                      tags$b("Pos:"),
+                      tags$span("hg19 variant position"),
+                      tags$b("Gene:"),
+                      tags$span("HUGO Identifier"),
+                      tags$b("Ensgid:"),
+                      tags$span("Ensemble Gene ID"),
+                      tags$b("P:"),
+                      tags$span("P-value of association"),
+                      tags$b("Beta:"),
+                      tags$span("Effect size (normalized)"),
+                      tags$b("EA:"),
+                      tags$span("Effect Allele"),
+                      tags$b("NEA:"),
+                      tags$span("Non-effect Allele"),
+                      tags$b("Colocalization:"),
+                      tags$span("Cis or Trans region"),
+                      tags$b("LD:"),
+                      tags$span("Linkage disequilibrium"),
                     ),
                     
                     # Show a plot of the generated distribution
@@ -1874,10 +1905,12 @@ server <- function(input, output, session) {
     } else {
       if (qtllookupStore$mode == 1) {
         # query by gene
-        header = c('source', 'tissue', 'rsid', 'chr', 'var_pos_hg19', 'p', 'beta', 'ea', 'nea', 'colocalization')
+        header       = c('source', 'tissue', 'rsid', 'chr', 'var_pos_hg19', 'p', 'beta', 'ea', 'nea', 'colocalization')
+        header.names = c('Source', 'Tissue', 'rsID', 'Chr', 'Pos (hg19)',   'P', 'Beta', 'EA', 'NEA', 'Colocalization')
       } else {
         # query by rsid
-        header = c('source', 'tissue', 'rsid', 'gene', 'ensgid', 'p', 'beta', 'ea', 'nea', 'colocalization')
+        header       = c('source', 'tissue', 'rsid', 'gene', 'ensgid', 'p', 'beta', 'ea', 'nea', 'colocalization')
+        header.names = c('Source', 'Tissue', 'rsID', 'Gene', 'ENSGID', 'P', 'Beta', 'EA', 'NEA', 'Colocalization')
       }
       qtllookupStore$header = header
       df = qtllookupStore$df[,header]
@@ -1890,6 +1923,7 @@ server <- function(input, output, session) {
       if (nrow(df) == 0) {
         data.frame(message='Query / filter combination has no results..')
       } else {
+        names(df) = header.names
         df
       }
     }
@@ -1943,13 +1977,17 @@ server <- function(input, output, session) {
   }
 
   output$qtlLookupHeaderText = renderUI({
-    if (qtllookupStore$mode == 1) {
-      h3(paste('QTL Gene lookup for query: ', qtllookupStore$query))
-    } else if (qtllookupStore$mode == 2) {
-      h3(paste('QTL rsid lookup for query: ', qtllookupStore$query))
-    } else {
-      h3('...')
-    }
+    tryCatch({
+      if (qtllookupStore$mode == 1) {
+        h3(paste('QTL Gene lookup for query: ', qtllookupStore$query))
+      } else if (qtllookupStore$mode == 2) {
+        h3(paste('QTL rsid lookup for query: ', qtllookupStore$query))
+      } else {
+        h3('...')
+      }},
+      error=function(cond) {
+          return ("")
+      })
   })
 
   observeEvent(input$qtltable_cell_clicked, {
@@ -1966,7 +2004,14 @@ server <- function(input, output, session) {
     }
   })
   observeEvent(input$qtllookupPerformQuery, {
-    doQTLLookup(input$qtllookupMode, input$qtllookupGene)
+    # choices = list("Query by gene" = 1, "Query by rsid" = 2), 
+    if (startsWith(input$qtllookupGene, "rs")) {
+        # rsid lookup
+        doQTLLookup(2, input$qtllookupGene)
+    } else {
+        # gene lookup
+        doQTLLookup(1, input$qtllookupGene)
+    }
   })
   
   output$qtlplot = renderPlot({
@@ -1995,7 +2040,7 @@ server <- function(input, output, session) {
         RACER::singlePlotRACER(assoc_data = df.racer, chr = chr, build = 'hg19', plotby = 'coord', start_plot = pos - window, end_plot = pos + window, label_lead = T)
         #RACER::singlePlotRACER(assoc_data = df.racer, chr = chr, build = 'hg19', plotby = 'gene', gene_plot = input$gene)
       } else {
-        print(table(df$chr))
+        #print(table(df$chr))
         qqman::manhattan(df, chr='chr', bp='var_pos_hg19', snp='rsid', p = 'p', annotateTop = T)
       }
     }
